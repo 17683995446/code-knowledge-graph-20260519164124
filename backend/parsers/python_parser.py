@@ -1,5 +1,6 @@
 import os
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional, Tuple
 from .base import BaseParser, ParseResult
 
 class PythonParser(BaseParser):
@@ -10,149 +11,148 @@ class PythonParser(BaseParser):
         result = ParseResult()
 
         try:
-            from tree_sitter import Language, Parser
-            import tree_sitter_python
-        except ImportError:
-            return self._parse_simple(file_path)
-
-        try:
-            language = Language(tree_sitter_python.language())
-            parser = Parser(language)
-            parser.set_language(language)
-
-            with open(file_path, 'rb') as f:
-                tree = parser.parse(f.read())
-
-            self._traverse(tree.root_node, result, None)
-        except Exception:
-            return self._parse_simple(file_path)
-
-        return result
-
-    def _parse_simple(self, file_path: str) -> ParseResult:
-        result = ParseResult()
-
-        try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+                content = f.read()
 
-            current_type = None
-            current_type_kind = None
-            current_type_start = None
-
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-
-                if stripped.startswith('class '):
-                    if current_type:
-                        result.types.append({
-                            'name': current_type,
-                            'kind': current_type_kind,
-                            'line_start': current_type_start,
-                            'line_end': i + 1
-                        })
-
-                    parts = stripped.split('(')[0].split()
-                    if len(parts) >= 2:
-                        current_type = parts[1]
-                        current_type_kind = 'class'
-                        current_type_start = i + 1
-
-                elif stripped.startswith('def '):
-                    func_name = stripped.split('(')[0].split()[1] if '(' in stripped else stripped.split()[1] if len(stripped.split()) >= 2 else 'unknown'
-
-                    if current_type:
-                        result.functions.append({
-                            'name': func_name,
-                            'type_name': current_type,
-                            'line_start': i + 1,
-                            'line_end': i + 1
-                        })
-                    else:
-                        result.functions.append({
-                            'name': func_name,
-                            'type_name': None,
-                            'line_start': i + 1,
-                            'line_end': i + 1
-                        })
-
-                elif stripped.startswith('async def '):
-                    func_name = stripped.split('(')[0].split()[2] if '(' in stripped else stripped.split()[2] if len(stripped.split()) >= 3 else 'unknown'
-
-                    if current_type:
-                        result.functions.append({
-                            'name': func_name,
-                            'type_name': current_type,
-                            'line_start': i + 1,
-                            'line_end': i + 1
-                        })
-                    else:
-                        result.functions.append({
-                            'name': func_name,
-                            'type_name': None,
-                            'line_start': i + 1,
-                            'line_end': i + 1
-                        })
-
-                elif stripped.startswith('@') and i + 1 < len(lines):
-                    next_line = lines[i + 1].strip()
-                    if next_line.startswith('def '):
-                        if current_type:
-                            current_type = None
-                            current_type_kind = None
-                            current_type_start = None
-                    elif not next_line.startswith('def '):
-                        current_type = None
-                        current_type_kind = None
-                        current_type_start = None
-
-                elif stripped and not stripped.startswith('#') and not stripped.startswith('"""') and not stripped.startswith("'''"):
-                    if current_type and not any(stripped.startswith(kw) for kw in ['if ', 'elif ', 'else:', 'for ', 'while ', 'try:', 'except', 'finally:', 'with ', 'return ', 'import ', 'from ']):
-                        if '=' in stripped and not '==' in stripped:
-                            current_type = None
-                            current_type_kind = None
-                            current_type_start = None
-
-            if current_type:
-                result.types.append({
-                    'name': current_type,
-                    'kind': current_type_kind,
-                    'line_start': current_type_start,
-                    'line_end': len(lines)
-                })
-
-        except Exception:
-            pass
+            result = self._parse_content(content)
+        except Exception as e:
+            print(f"Error parsing Python file {file_path}: {e}")
 
         return result
 
-    def _traverse(self, node, result: ParseResult, parent_type: tuple):
-        if node.type in ('class_definition', 'function_definition', 'async_function_definition'):
-            name_node = None
-            for child in node.children:
-                if child.type == 'identifier':
-                    name_node = child
+    def _parse_content(self, content: str) -> ParseResult:
+        result = ParseResult()
+        lines = content.split('\n')
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # 跳过空行和注释
+            if not stripped or stripped.startswith('#'):
+                i += 1
+                continue
+
+            # 检查装饰器
+            is_dataclass = False
+            is_abstract = False
+            while stripped.startswith('@'):
+                if '@dataclass' in stripped:
+                    is_dataclass = True
+                elif '@abstractmethod' in stripped or 'ABC' in stripped:
+                    is_abstract = True
+                i += 1
+                if i < len(lines):
+                    line = lines[i]
+                    stripped = line.strip()
+                else:
                     break
 
-            if name_node:
-                name = name_node.text.decode('utf-8')
+            if not stripped:
+                continue
 
-                if node.type == 'class_definition':
-                    result.types.append({
-                        'name': name,
-                        'kind': 'class',
-                        'line_start': node.start_point[0] + 1,
-                        'line_end': node.end_point[0] + 1
-                    })
-                    self._traverse(node, result, ('type', name))
-                else:
-                    func_name = parent_type[1] + '.' + name if parent_type else name
-                    result.functions.append({
-                        'name': name,
-                        'type_name': parent_type[1] if parent_type else None,
-                        'line_start': node.start_point[0] + 1,
-                        'line_end': node.end_point[0] + 1
-                    })
+            # 解析类定义
+            class_match = re.match(r'^class\s+(\w+)(.*?):', stripped)
+            if class_match:
+                class_name = class_match.group(1)
+                kind = 'class'
 
-        for child in node.children:
-            self._traverse(child, result, parent_type)
+                if is_dataclass:
+                    kind = 'dataclass'
+                elif is_abstract:
+                    kind = 'abstract_class'
+
+                # 查找类的结束位置
+                end_line = self._find_indent_block_end(lines, i)
+
+                result.types.append({
+                    'name': class_name,
+                    'kind': kind,
+                    'line_start': i + 1,
+                    'line_end': end_line
+                })
+
+                # 解析类内的方法
+                j = i + 1
+                while j < end_line and j < len(lines):
+                    method_line = lines[j].strip()
+
+                    if method_line.startswith('def ') or method_line.startswith('async def '):
+                        method_info = self._parse_function_def(method_line, j)
+                        if method_info:
+                            method_info['type_name'] = class_name
+                            result.functions.append(method_info)
+
+                    j += 1
+
+                i = end_line
+                continue
+
+            # 解析顶层函数
+            if stripped.startswith('def ') or stripped.startswith('async def '):
+                func_info = self._parse_function_def(stripped, i)
+                if func_info:
+                    result.functions.append(func_info)
+
+            i += 1
+
+        return result
+
+    def _parse_function_def(self, line: str, line_num: int) -> Optional[Dict[str, Any]]:
+        stripped = line.strip()
+
+        if not (stripped.startswith('def ') or stripped.startswith('async def ')):
+            return None
+
+        # 移除async关键字
+        def_part = stripped.replace('async def ', 'def ')
+
+        # 提取函数名
+        match = re.match(r'def\s+(\w+)\s*\(', def_part)
+        if not match:
+            return None
+
+        func_name = match.group(1)
+
+        # 查找函数体结束位置
+        indent_match = re.match(r'^(\s*)', line)
+        base_indent = len(indent_match.group(1)) if indent_match else 0
+
+        return {
+            'name': func_name,
+            'type_name': None,
+            'line_start': line_num + 1,
+            'line_end': line_num + 1
+        }
+
+    def _find_indent_block_end(self, lines: List[str], start_line: int) -> int:
+        """查找缩进块的结束行"""
+        if start_line >= len(lines):
+            return start_line
+
+        # 获取类定义的缩进级别
+        first_line = lines[start_line]
+        indent_match = re.match(r'^(\s*)', first_line)
+        base_indent = len(indent_match.group(1)) if indent_match else 0
+
+        i = start_line + 1
+        while i < len(lines):
+            line = lines[i]
+
+            # 空行或纯注释行不计入
+            if not line.strip() or line.strip().startswith('#'):
+                i += 1
+                continue
+
+            # 获取当前行的缩进
+            indent_match = re.match(r'^(\s*)', line)
+            current_indent = len(indent_match.group(1)) if indent_match else 0
+
+            # 如果缩进回到base_indent或更少，类结束
+            if current_indent <= base_indent:
+                return i
+
+            i += 1
+
+        return len(lines)
