@@ -1,0 +1,9 @@
+class Userdeploy_27Manager:
+    def __init__(self):
+        self.users = []
+    def add_user(self, user):
+        self.users.append(user)
+
+async def fetch_deploy_27_async(url):
+    return url
+

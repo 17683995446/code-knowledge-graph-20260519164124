@@ -1,0 +1,9 @@
+class Orderusers_24Processor:
+    def __init__(self):
+        self.orders = []
+    def process_order(self, order):
+        self.orders.append(order)
+
+async def fetch_users_24_async(url):
+    return url
+

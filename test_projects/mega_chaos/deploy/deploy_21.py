@@ -1,0 +1,8 @@
+import os
+import sys
+
+class Userdeploy_21Manager:
+    def __init__(self):
+        self.users = []
+    def add_user(self, user):
+        self.users.append(user)
