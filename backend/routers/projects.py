@@ -18,6 +18,13 @@ async def create_project(project: ProjectCreate):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/{project_id}", response_model=ProjectResponse)
+async def get_project(project_id: int):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return project
+
 @router.delete("/{project_id}")
 async def delete_project(project_id: int):
     project = db.get_project(project_id)

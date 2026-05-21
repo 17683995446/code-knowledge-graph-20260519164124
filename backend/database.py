@@ -1,7 +1,10 @@
 import sqlite3
+import logging
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 from .config import config
+
+logger = logging.getLogger("Database")
 
 class Database:
     def __init__(self, db_path: str = None):
@@ -95,6 +98,7 @@ class Database:
             """)
 
     def create_project(self, name: str, path: str) -> int:
+        logger.info(f"create_project: 开始创建项目 name={name}, path={path}")
         import time
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -102,26 +106,39 @@ class Database:
                 "INSERT INTO projects (name, path, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (name, path, int(time.time()), int(time.time()))
             )
-            return cursor.lastrowid
+            project_id = cursor.lastrowid
+            logger.info(f"create_project: 项目创建成功 project_id={project_id}")
+            return project_id
 
     def get_projects(self) -> List[Dict[str, Any]]:
+        logger.debug("get_projects: 开始获取项目列表")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM projects ORDER BY updated_at DESC")
-            return [dict(row) for row in cursor.fetchall()]
+            projects = [dict(row) for row in cursor.fetchall()]
+            logger.debug(f"get_projects: 获取到 {len(projects)} 个项目")
+            return projects
 
     def get_project(self, project_id: int) -> Optional[Dict[str, Any]]:
+        logger.debug(f"get_project: 开始获取项目 project_id={project_id}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
             row = cursor.fetchone()
-            return dict(row) if row else None
+            project = dict(row) if row else None
+            if project:
+                logger.debug(f"get_project: 获取到项目 {project['name']}")
+            else:
+                logger.warning(f"get_project: 项目不存在 project_id={project_id}")
+            return project
 
     def delete_project(self, project_id: int):
+        logger.info(f"delete_project: 开始删除项目 project_id={project_id}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM files WHERE project_id = ?", (project_id,))
             file_ids = [row[0] for row in cursor.fetchall()]
+            logger.info(f"delete_project: 将删除 {len(file_ids)} 个相关文件")
 
             for file_id in file_ids:
                 cursor.execute("DELETE FROM calls WHERE caller_id = ? OR callee_id = ?", (file_id, file_id))
@@ -131,14 +148,17 @@ class Database:
                 cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
 
             cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            logger.info(f"delete_project: 项目删除完成 project_id={project_id}")
 
     def update_project_time(self, project_id: int):
+        logger.debug(f"update_project_time: 更新项目时间 project_id={project_id}")
         import time
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (int(time.time()), project_id))
 
     def get_or_create_file(self, project_id: int, path: str, language: str, hash: str) -> int:
+        logger.debug(f"get_or_create_file: 处理文件 project_id={project_id}, path={path}, language={language}")
         import time
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -146,7 +166,9 @@ class Database:
                 "INSERT OR REPLACE INTO files (project_id, path, language, hash, modified) VALUES (?, ?, ?, ?, ?)",
                 (project_id, path, language, hash, int(time.time()))
             )
-            return cursor.lastrowid
+            file_id = cursor.lastrowid
+            logger.debug(f"get_or_create_file: 文件处理完成 file_id={file_id}")
+            return file_id
 
     def delete_file_by_path(self, project_id: int, path: str):
         with self.get_connection() as conn:
