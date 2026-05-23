@@ -17,10 +17,15 @@ class SyncEngine:
         return config.SUPPORTED_LANGUAGES.get(ext, None)
 
     def calculate_hash(self, file_path: str) -> str:
+        """分块计算文件哈希，避免大文件内存问题"""
         try:
+            hash_md5 = hashlib.md5()
             with open(file_path, 'rb') as f:
-                return hashlib.md5(f.read()).hexdigest()
-        except Exception:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_md5.update(chunk)
+            return hash_md5.hexdigest()
+        except Exception as e:
+            logger.error(f"calculate_hash: 计算文件哈希失败 {file_path}, error: {e}")
             return ""
 
     def sync_project(self, project_id: int) -> Dict[str, Any]:
@@ -58,11 +63,11 @@ class SyncEngine:
 
         logger.info(f"sync_project: 扫描完成，发现 {len(files_to_process)} 个待处理文件")
         files_processed = 0
-        for file_info in files_to_process:
-            logger.debug(f"sync_project: 处理文件 {file_info['relative_path']} ({file_info['language']})")
+        for idx, file_info in enumerate(files_to_process):
+            logger.debug(f"sync_project: 处理文件 {idx+1}/{len(files_to_process)} {file_info['relative_path']} ({file_info['language']})")
             self._process_file(project_id, file_info['path'], file_info['language'], file_info['hash'])
             files_processed += 1
-            if files_processed % 100 == 0:
+            if files_processed % 50 == 0:
                 logger.info(f"sync_project: 已处理 {files_processed}/{len(files_to_process)} 个文件")
 
         self.db.update_project_time(project_id)
@@ -113,7 +118,7 @@ class SyncEngine:
             logger.debug(f"_process_file: 保存了 {len(parse_result.functions)} 个函数")
 
         except Exception as e:
-            logger.error(f"_process_file: 处理文件时出错 file_path={file_path}, error={str(e)}", exc_info=True)
+            logger.error(f"_process_file: 处理文件时出错 file_path={file_path}, error: {str(e)}", exc_info=True)
 
     def process_file_event(self, project_id: int, file_path: str, event_type: str):
         language = self.get_language_by_extension(file_path)

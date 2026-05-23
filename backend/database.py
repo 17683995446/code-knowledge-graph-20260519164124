@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import os
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 from .config import config
@@ -99,16 +100,40 @@ class Database:
 
     def create_project(self, name: str, path: str) -> int:
         logger.info(f"create_project: 开始创建项目 name={name}, path={path}")
+        
+        # 参数验证
+        if not name or not name.strip():
+            error_msg = "项目名称不能为空"
+            logger.error(f"create_project: {error_msg}")
+            raise ValueError(error_msg)
+        if len(name.strip()) > 1000:
+            error_msg = "项目名称过长（最大1000字符）"
+            logger.error(f"create_project: {error_msg}")
+            raise ValueError(error_msg)
+        if not path or not path.strip():
+            error_msg = "项目路径不能为空"
+            logger.error(f"create_project: {error_msg}")
+            raise ValueError(error_msg)
+        if not os.path.exists(path):
+            error_msg = f"项目路径不存在: {path}"
+            logger.error(f"create_project: {error_msg}")
+            raise ValueError(error_msg)
+        
         import time
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO projects (name, path, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (name, path, int(time.time()), int(time.time()))
-            )
-            project_id = cursor.lastrowid
-            logger.info(f"create_project: 项目创建成功 project_id={project_id}")
-            return project_id
+            try:
+                cursor.execute(
+                    "INSERT INTO projects (name, path, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (name.strip(), path.strip(), int(time.time()), int(time.time()))
+                )
+                project_id = cursor.lastrowid
+                logger.info(f"create_project: 项目创建成功 project_id={project_id}")
+                return project_id
+            except sqlite3.IntegrityError as e:
+                error_msg = f"项目路径已存在: {path}"
+                logger.error(f"create_project: {error_msg}, error: {e}")
+                raise ValueError(error_msg)
 
     def get_projects(self) -> List[Dict[str, Any]]:
         logger.debug("get_projects: 开始获取项目列表")
@@ -162,12 +187,25 @@ class Database:
         import time
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO files (project_id, path, language, hash, modified) VALUES (?, ?, ?, ?, ?)",
-                (project_id, path, language, hash, int(time.time()))
-            )
-            file_id = cursor.lastrowid
-            logger.debug(f"get_or_create_file: 文件处理完成 file_id={file_id}")
+            # 检查是否已存在
+            cursor.execute("SELECT id FROM files WHERE project_id = ? AND path = ?", (project_id, path))
+            row = cursor.fetchone()
+            if row:
+                # 更新文件
+                cursor.execute(
+                    "UPDATE files SET hash = ?, modified = ?, language = ? WHERE project_id = ? AND path = ?",
+                    (hash, int(time.time()), language, project_id, path)
+                )
+                file_id = row[0]
+                logger.debug(f"get_or_create_file: 文件已存在，更新完成 file_id={file_id}")
+            else:
+                # 插入新文件
+                cursor.execute(
+                    "INSERT INTO files (project_id, path, language, hash, modified) VALUES (?, ?, ?, ?, ?)",
+                    (project_id, path, language, hash, int(time.time()))
+                )
+                file_id = cursor.lastrowid
+                logger.debug(f"get_or_create_file: 文件已保存 file_id={file_id}")
             return file_id
 
     def delete_file_by_path(self, project_id: int, path: str):
@@ -184,24 +222,63 @@ class Database:
                 cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
 
     def insert_type(self, file_id: int, name: str, kind: str, line_start: int = None, line_end: int = None) -> int:
+        logger.debug(f"insert_type: 插入类型 file_id={file_id}, name={name}, kind={kind}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            # 检查是否已存在
             cursor.execute(
-                "INSERT OR REPLACE INTO types (file_id, name, kind, line_start, line_end) VALUES (?, ?, ?, ?, ?)",
-                (file_id, name, kind, line_start, line_end)
+                "SELECT id FROM types WHERE file_id = ? AND name = ? AND kind = ?",
+                (file_id, name, kind)
             )
-            return cursor.lastrowid
+            row = cursor.fetchone()
+            if row:
+                # 更新
+                cursor.execute(
+                    "UPDATE types SET line_start = ?, line_end = ? WHERE id = ?",
+                    (line_start, line_end, row[0])
+                )
+                type_id = row[0]
+                logger.debug(f"insert_type: 类型已存在，已更新 type_id={type_id}")
+            else:
+                # 插入新记录
+                cursor.execute(
+                    "INSERT INTO types (file_id, name, kind, line_start, line_end) VALUES (?, ?, ?, ?, ?)",
+                    (file_id, name, kind, line_start, line_end)
+                )
+                type_id = cursor.lastrowid
+                logger.debug(f"insert_type: 类型已插入 type_id={type_id}")
+            return type_id
 
     def insert_function(self, file_id: int, type_id: Optional[int], name: str, line_start: int = None, line_end: int = None) -> int:
+        logger.debug(f"insert_function: 插入函数 file_id={file_id}, type_id={type_id}, name={name}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            # 检查是否已存在
             cursor.execute(
-                "INSERT OR REPLACE INTO functions (file_id, type_id, name, line_start, line_end) VALUES (?, ?, ?, ?, ?)",
-                (file_id, type_id, name, line_start, line_end)
+                "SELECT id FROM functions WHERE file_id = ? AND type_id IS ? AND name = ?",
+                (file_id, type_id, name)
             )
-            return cursor.lastrowid
+            row = cursor.fetchone()
+            if row:
+                # 更新
+                cursor.execute(
+                    "UPDATE functions SET line_start = ?, line_end = ? WHERE id = ?",
+                    (line_start, line_end, row[0])
+                )
+                func_id = row[0]
+                logger.debug(f"insert_function: 函数已存在，已更新 func_id={func_id}")
+            else:
+                # 插入新记录
+                cursor.execute(
+                    "INSERT INTO functions (file_id, type_id, name, line_start, line_end) VALUES (?, ?, ?, ?, ?)",
+                    (file_id, type_id, name, line_start, line_end)
+                )
+                func_id = cursor.lastrowid
+                logger.debug(f"insert_function: 函数已插入 func_id={func_id}")
+            return func_id
 
     def insert_call(self, caller_id: int, caller_type: str, callee_id: int, callee_type: str):
+        logger.debug(f"insert_call: 插入调用关系 caller_id={caller_id}, callee_id={callee_id}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -210,6 +287,7 @@ class Database:
             )
 
     def insert_ref(self, from_id: int, from_type: str, to_id: int, to_type: str, kind: str):
+        logger.debug(f"insert_ref: 插入引用关系 from_id={from_id}, to_id={to_id}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -218,6 +296,7 @@ class Database:
             )
 
     def get_graph_data(self, project_id: int) -> Dict[str, Any]:
+        logger.debug(f"get_graph_data: 获取图谱数据 project_id={project_id}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -264,7 +343,7 @@ class Database:
                 JOIN files f1 ON (c.caller_type = 'type' AND c.caller_id IN (SELECT id FROM types WHERE file_id = f1.id))
                                OR (c.caller_type = 'function' AND c.caller_id IN (SELECT id FROM functions WHERE file_id = f1.id))
                 JOIN files f2 ON (c.callee_type = 'type' AND c.callee_id IN (SELECT id FROM types WHERE file_id = f2.id))
-                               OR (c.callee_type = 'function' AND c.callee_id IN (SELECT id FROM functions WHERE file_id = f2.id))
+                               OR (c.callee_type = 'function' AND c.callee_id IN (SELECT id FROM types WHERE file_id = f2.id))
                 WHERE f1.project_id = ? AND f2.project_id = ?
             """, (project_id, project_id))
             calls = [dict(row) for row in cursor.fetchall()]
@@ -295,9 +374,11 @@ class Database:
                     "relation": r['kind']
                 })
 
+            logger.debug(f"get_graph_data: 构建完成，{len(nodes)} 个节点，{len(links)} 个关系")
             return {"nodes": nodes, "links": links}
 
     def search(self, project_id: int, query: str, type_filter: str = None) -> List[Dict[str, Any]]:
+        logger.debug(f"search: 开始搜索 project_id={project_id}, query={query}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             results = []
@@ -320,9 +401,11 @@ class Database:
                 """, (project_id, f"%{query}%"))
                 results.extend([dict(row) for row in cursor.fetchall()])
 
+            logger.debug(f"search: 搜索完成，找到 {len(results)} 个结果")
             return results
 
     def get_stats(self, project_id: int) -> Dict[str, Any]:
+        logger.debug(f"get_stats: 获取统计信息 project_id={project_id}")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM files WHERE project_id = ?", (project_id,))
@@ -349,11 +432,13 @@ class Database:
             """, (project_id,))
             languages = {row[0]: row[1] for row in cursor.fetchall()}
 
-            return {
+            stats = {
                 "file_count": file_count,
                 "type_count": type_count,
                 "function_count": func_count,
                 "languages": languages
             }
+            logger.debug(f"get_stats: 统计完成 {stats}")
+            return stats
 
 db = Database()
