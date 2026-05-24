@@ -23,9 +23,16 @@ class PythonParser(BaseParser):
             logger.debug(f"[parse] 文件读取完成，开始解析内容")
             result = self._parse_content(content)
             logger.debug(f"[parse] 解析完成，发现 {len(result.types)} 个类型和 {len(result.functions)} 个函数")
+        except UnicodeDecodeError as e:
+            logger.warning(f"[parse] 编码错误，尝试使用其他编码: {file_path}, {e}")
+            try:
+                with open(file_path, 'r', encoding='latin-1') as f:
+                    content = f.read()
+                result = self._parse_content(content)
+            except Exception as e2:
+                logger.error(f"[parse] 最终解析失败: {file_path}, {e2}")
         except Exception as e:
             logger.error(f"[parse] 解析 Python 文件 {file_path} 时出错: {e}", exc_info=True)
-            print(f"Error parsing Python file {file_path}: {e}")
 
         return result
 
@@ -127,76 +134,60 @@ class PythonParser(BaseParser):
         return result
 
     def _parse_function_def(self, line: str, line_num: int) -> Optional[Dict[str, Any]]:
-        logger.debug(f"[_parse_function_def] 解析函数定义 (第 {line_num} 行)")
-        stripped = line.strip()
+        logger.debug(f"[_parse_function_def] 解析函数定义 (第 {line_num} 行): {line[:80]}...")
+        
+        async_prefix = ''
+        if line.startswith('async def '):
+            async_prefix = 'async '
+            func_part = line[len('async def '):]
+        else:
+            func_part = line[len('def '):]
+        
+        func_name_match = re.match(r'(\w+)\s*\(', func_part)
+        if func_name_match:
+            func_name = func_name_match.group(1)
+            logger.debug(f"[_parse_function_def] 解析到函数名: {func_name}")
+            
+            return {
+                'name': func_name,
+                'kind': 'function',
+                'line_start': line_num + 1,
+                'line_end': line_num + 1
+            }
+        
+        logger.debug(f"[_parse_function_def] 函数名解析失败")
+        return None
 
-        if not (stripped.startswith('def ') or stripped.startswith('async def ')):
-            logger.debug(f"[_parse_function_def] 不是有效的函数定义")
-            return None
-
-        logger.debug(f"[_parse_function_def] 有效的函数定义")
-        # 移除async关键字
-        def_part = stripped.replace('async def ', 'def ')
-        logger.debug(f"[_parse_function_def] 清理后的定义: {def_part[:50]}...")
-
-        # 提取函数名
-        match = re.match(r'def\s+(\w+)\s*\(', def_part)
-        if not match:
-            logger.debug(f"[_parse_function_def] 无法匹配函数名")
-            return None
-
-        func_name = match.group(1)
-        logger.debug(f"[_parse_function_def] 提取函数名: {func_name}")
-
-        # 查找函数体结束位置
-        indent_match = re.match(r'^(\s*)', line)
-        base_indent = len(indent_match.group(1)) if indent_match else 0
-        logger.debug(f"[_parse_function_def] 基础缩进: {base_indent}")
-
-        result = {
-            'name': func_name,
-            'type_name': None,
-            'line_start': line_num + 1,
-            'line_end': line_num + 1
-        }
-        logger.debug(f"[_parse_function_def] 返回函数信息")
-        return result
-
-    def _find_indent_block_end(self, lines: List[str], start_line: int) -> int:
-        """查找缩进块的结束行"""
-        logger.debug(f"[_find_indent_block_end] 从第 {start_line} 行查找缩进块结束位置")
-        if start_line >= len(lines):
-            logger.debug(f"[_find_indent_block_end] 超出范围，返回 {start_line}")
-            return start_line
-
-        # 获取类定义的缩进级别
-        first_line = lines[start_line]
-        indent_match = re.match(r'^(\s*)', first_line)
-        base_indent = len(indent_match.group(1)) if indent_match else 0
-        logger.debug(f"[_find_indent_block_end] 基础缩进: {base_indent}")
-
-        i = start_line + 1
+    def _find_indent_block_end(self, lines: List[str], start_idx: int) -> int:
+        logger.debug(f"[_find_indent_block_end] 查找缩进块结束位置，起始行: {start_idx}")
+        
+        if start_idx >= len(lines):
+            logger.debug(f"[_find_indent_block_end] 起始索引超出范围")
+            return start_idx
+        
+        # 查找起始行的缩进
+        start_line = lines[start_idx]
+        base_indent = len(start_line) - len(start_line.lstrip())
+        logger.debug(f"[_find_indent_block_end] 基础缩进: {base_indent} 个字符")
+        
+        i = start_idx + 1
         while i < len(lines):
-            logger.debug(f"[_find_indent_block_end] 检查第 {i} 行")
-            line = lines[i]
-
-            # 空行或纯注释行不计入
-            if not line.strip() or line.strip().startswith('#'):
-                logger.debug(f"[_find_indent_block_end] 空行或注释，跳过")
+            current_line = lines[i]
+            
+            # 跳过空行
+            if not current_line.strip():
                 i += 1
                 continue
-
-            # 获取当前行的缩进
-            indent_match = re.match(r'^(\s*)', line)
-            current_indent = len(indent_match.group(1)) if indent_match else 0
-            logger.debug(f"[_find_indent_block_end] 当前缩进: {current_indent}")
-
-            # 如果缩进回到base_indent或更少，类结束
+            
+            current_indent = len(current_line) - len(current_line.lstrip())
+            
+            # 如果遇到缩进更小的非空行，说明块结束
             if current_indent <= base_indent:
-                logger.debug(f"[_find_indent_block_end] 缩进减小，块结束于第 {i} 行")
+                logger.debug(f"[_find_indent_block_end] 在第 {i} 行发现块结束")
                 return i
-
+            
             i += 1
-
-        logger.debug(f"[_find_indent_block_end] 到达文件末尾，返回 {len(lines)}")
-        return len(lines)
+        
+        # 如果到文件末尾，返回最后一行
+        logger.debug(f"[_find_indent_block_end] 块结束于文件末尾")
+        return len(lines) - 1
