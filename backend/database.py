@@ -4,6 +4,16 @@ import os
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 from .config import config
+from .validators import (
+    validate_project_name,
+    validate_project_path,
+    validate_project_id,
+    validate_search_query,
+    validate_integer,
+    validate_file_path,
+    safe_like_pattern,
+    ValidationError
+)
 
 logger = logging.getLogger("Database")
 
@@ -101,39 +111,30 @@ class Database:
     def create_project(self, name: str, path: str) -> int:
         logger.info(f"create_project: 开始创建项目 name={name}, path={path}")
         
-        # 参数验证
-        if not name or not name.strip():
-            error_msg = "项目名称不能为空"
-            logger.error(f"create_project: {error_msg}")
-            raise ValueError(error_msg)
-        if len(name.strip()) > 1000:
-            error_msg = "项目名称过长（最大1000字符）"
-            logger.error(f"create_project: {error_msg}")
-            raise ValueError(error_msg)
-        if not path or not path.strip():
-            error_msg = "项目路径不能为空"
-            logger.error(f"create_project: {error_msg}")
-            raise ValueError(error_msg)
-        if not os.path.exists(path):
-            error_msg = f"项目路径不存在: {path}"
-            logger.error(f"create_project: {error_msg}")
-            raise ValueError(error_msg)
-        
-        import time
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "INSERT INTO projects (name, path, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (name.strip(), path.strip(), int(time.time()), int(time.time()))
-                )
-                project_id = cursor.lastrowid
-                logger.info(f"create_project: 项目创建成功 project_id={project_id}")
-                return project_id
-            except sqlite3.IntegrityError as e:
-                error_msg = f"项目路径已存在: {path}"
-                logger.error(f"create_project: {error_msg}, error: {e}")
-                raise ValueError(error_msg)
+        try:
+            # 使用验证器进行参数验证
+            clean_name = validate_project_name(name)
+            clean_path = validate_project_path(path)
+            
+            import time
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        "INSERT INTO projects (name, path, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                        (clean_name, clean_path, int(time.time()), int(time.time()))
+                    )
+                    project_id = cursor.lastrowid
+                    logger.info(f"create_project: 项目创建成功 project_id={project_id}")
+                    return project_id
+                except sqlite3.IntegrityError as e:
+                    error_msg = f"项目路径已存在: {path}"
+                    logger.error(f"create_project: {error_msg}, error: {e}")
+                    raise ValueError(error_msg)
+                    
+        except ValidationError as e:
+            logger.error(f"create_project: 验证失败 - {e}")
+            raise ValueError(str(e))
 
     def get_projects(self) -> List[Dict[str, Any]]:
         logger.debug("get_projects: 开始获取项目列表")
@@ -146,41 +147,56 @@ class Database:
 
     def get_project(self, project_id: int) -> Optional[Dict[str, Any]]:
         logger.debug(f"get_project: 开始获取项目 project_id={project_id}")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
-            row = cursor.fetchone()
-            project = dict(row) if row else None
-            if project:
-                logger.debug(f"get_project: 获取到项目 {project['name']}")
-            else:
-                logger.warning(f"get_project: 项目不存在 project_id={project_id}")
-            return project
+        try:
+            valid_project_id = validate_project_id(project_id)
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM projects WHERE id = ?", (valid_project_id,))
+                row = cursor.fetchone()
+                project = dict(row) if row else None
+                if project:
+                    logger.debug(f"get_project: 获取到项目 {project['name']}")
+                else:
+                    logger.warning(f"get_project: 项目不存在 project_id={valid_project_id}")
+                return project
+        except ValidationError as e:
+            logger.error(f"get_project: 验证失败 - {e}")
+            raise ValueError(str(e))
 
     def delete_project(self, project_id: int):
         logger.info(f"delete_project: 开始删除项目 project_id={project_id}")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM files WHERE project_id = ?", (project_id,))
-            file_ids = [row[0] for row in cursor.fetchall()]
-            logger.info(f"delete_project: 将删除 {len(file_ids)} 个相关文件")
+        try:
+            valid_project_id = validate_project_id(project_id)
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM files WHERE project_id = ?", (valid_project_id,))
+                file_ids = [row[0] for row in cursor.fetchall()]
+                logger.info(f"delete_project: 将删除 {len(file_ids)} 个相关文件")
 
-            for file_id in file_ids:
-                cursor.execute("DELETE FROM calls WHERE caller_id = ? OR callee_id = ?", (file_id, file_id))
-                cursor.execute("DELETE FROM refs WHERE from_id = ? OR to_id = ?", (file_id, file_id))
-                cursor.execute("DELETE FROM functions WHERE file_id = ?", (file_id,))
-                cursor.execute("DELETE FROM types WHERE file_id = ?", (file_id,))
-                cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+                for file_id in file_ids:
+                    cursor.execute("DELETE FROM calls WHERE caller_id = ? OR callee_id = ?", (file_id, file_id))
+                    cursor.execute("DELETE FROM refs WHERE from_id = ? OR to_id = ?", (file_id, file_id))
+                    cursor.execute("DELETE FROM functions WHERE file_id = ?", (file_id,))
+                    cursor.execute("DELETE FROM types WHERE file_id = ?", (file_id,))
+                    cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
 
-            cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-            logger.info(f"delete_project: 项目删除完成 project_id={project_id}")
+                cursor.execute("DELETE FROM projects WHERE id = ?", (valid_project_id,))
+                logger.info(f"delete_project: 项目删除完成 project_id={valid_project_id}")
+        except ValidationError as e:
+            logger.error(f"delete_project: 验证失败 - {e}")
+            raise ValueError(str(e))
 
     def update_project_time(self, project_id: int):
         logger.debug(f"update_project_time: 更新项目时间 project_id={project_id}")
-        import time
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (int(time.time()), project_id))
+        try:
+            valid_project_id = validate_project_id(project_id)
+            import time
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (int(time.time()), valid_project_id))
+        except ValidationError as e:
+            logger.error(f"update_project_time: 验证失败 - {e}")
+            raise ValueError(str(e))
 
     def get_or_create_file(self, project_id: int, path: str, language: str, hash: str) -> int:
         logger.debug(f"get_or_create_file: 处理文件 project_id={project_id}, path={path}, language={language}")
@@ -297,148 +313,165 @@ class Database:
 
     def get_graph_data(self, project_id: int) -> Dict[str, Any]:
         logger.debug(f"get_graph_data: 获取图谱数据 project_id={project_id}")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT DISTINCT t.id, t.name, t.kind, f.id as file_id, f.path as file_path
-                FROM types t
-                JOIN files f ON t.file_id = f.id
-                WHERE f.project_id = ?
-            """, (project_id,))
-            type_nodes = [dict(row) for row in cursor.fetchall()]
+        try:
+            valid_project_id = validate_project_id(project_id)
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT t.id, t.name, t.kind, f.id as file_id, f.path as file_path
+                    FROM types t
+                    JOIN files f ON t.file_id = f.id
+                    WHERE f.project_id = ?
+                """, (valid_project_id,))
+                type_nodes = [dict(row) for row in cursor.fetchall()]
 
-            cursor.execute("""
-                SELECT DISTINCT f.id, f.name, f.type_id, f.file_id, ff.path as file_path
-                FROM functions f
-                JOIN files ff ON f.file_id = ff.id
-                WHERE ff.project_id = ?
-            """, (project_id,))
-            func_nodes = [dict(row) for row in cursor.fetchall()]
+                cursor.execute("""
+                    SELECT DISTINCT f.id, f.name, f.type_id, f.file_id, ff.path as file_path
+                    FROM functions f
+                    JOIN files ff ON f.file_id = ff.id
+                    WHERE ff.project_id = ?
+                """, (valid_project_id,))
+                func_nodes = [dict(row) for row in cursor.fetchall()]
 
-            nodes = []
-            for t in type_nodes:
-                nodes.append({
-                    "id": f"type_{t['id']}",
-                    "name": t['name'],
-                    "type": "type",
-                    "kind": t['kind'],
-                    "file_id": t['file_id'],
-                    "file_path": t['file_path']
-                })
+                nodes = []
+                for t in type_nodes:
+                    nodes.append({
+                        "id": f"type_{t['id']}",
+                        "name": t['name'],
+                        "type": "type",
+                        "kind": t['kind'],
+                        "file_id": t['file_id'],
+                        "file_path": t['file_path']
+                    })
 
-            for f in func_nodes:
-                nodes.append({
-                    "id": f"func_{f['id']}",
-                    "name": f['name'],
-                    "type": "function",
-                    "kind": "function",
-                    "file_id": f['file_id'],
-                    "file_path": f['file_path'],
-                    "type_id": f['type_id']
-                })
+                for f in func_nodes:
+                    nodes.append({
+                        "id": f"func_{f['id']}",
+                        "name": f['name'],
+                        "type": "function",
+                        "kind": "function",
+                        "file_id": f['file_id'],
+                        "file_path": f['file_path'],
+                        "type_id": f['type_id']
+                    })
 
-            cursor.execute("""
-                SELECT c.caller_id, c.caller_type, c.callee_id, c.callee_type
-                FROM calls c
-                JOIN files f1 ON (c.caller_type = 'type' AND c.caller_id IN (SELECT id FROM types WHERE file_id = f1.id))
-                               OR (c.caller_type = 'function' AND c.caller_id IN (SELECT id FROM functions WHERE file_id = f1.id))
-                JOIN files f2 ON (c.callee_type = 'type' AND c.callee_id IN (SELECT id FROM types WHERE file_id = f2.id))
-                               OR (c.callee_type = 'function' AND c.callee_id IN (SELECT id FROM types WHERE file_id = f2.id))
-                WHERE f1.project_id = ? AND f2.project_id = ?
-            """, (project_id, project_id))
-            calls = [dict(row) for row in cursor.fetchall()]
+                cursor.execute("""
+                    SELECT c.caller_id, c.caller_type, c.callee_id, c.callee_type
+                    FROM calls c
+                    JOIN files f1 ON (c.caller_type = 'type' AND c.caller_id IN (SELECT id FROM types WHERE file_id = f1.id))
+                                   OR (c.caller_type = 'function' AND c.caller_id IN (SELECT id FROM functions WHERE file_id = f1.id))
+                    JOIN files f2 ON (c.callee_type = 'type' AND c.callee_id IN (SELECT id FROM types WHERE file_id = f2.id))
+                                   OR (c.callee_type = 'function' AND c.callee_id IN (SELECT id FROM types WHERE file_id = f2.id))
+                    WHERE f1.project_id = ? AND f2.project_id = ?
+                """, (valid_project_id, valid_project_id))
+                calls = [dict(row) for row in cursor.fetchall()]
 
-            cursor.execute("""
-                SELECT r.from_id, r.from_type, r.to_id, r.to_type, r.kind
-                FROM refs r
-                JOIN files f1 ON (r.from_type = 'type' AND r.from_id IN (SELECT id FROM types WHERE file_id = f1.id))
-                              OR (r.from_type = 'function' AND r.from_id IN (SELECT id FROM functions WHERE file_id = f1.id))
-                JOIN files f2 ON (r.to_type = 'type' AND r.to_id IN (SELECT id FROM types WHERE file_id = f2.id))
-                              OR (r.to_type = 'function' AND r.to_id IN (SELECT id FROM functions WHERE file_id = f2.id))
-                WHERE f1.project_id = ? AND f2.project_id = ?
-            """, (project_id, project_id))
-            refs = [dict(row) for row in cursor.fetchall()]
+                cursor.execute("""
+                    SELECT r.from_id, r.from_type, r.to_id, r.to_type, r.kind
+                    FROM refs r
+                    JOIN files f1 ON (r.from_type = 'type' AND r.from_id IN (SELECT id FROM types WHERE file_id = f1.id))
+                                  OR (r.from_type = 'function' AND r.from_id IN (SELECT id FROM functions WHERE file_id = f1.id))
+                    JOIN files f2 ON (r.to_type = 'type' AND r.to_id IN (SELECT id FROM types WHERE file_id = f2.id))
+                                  OR (r.to_type = 'function' AND r.to_id IN (SELECT id FROM functions WHERE file_id = f2.id))
+                    WHERE f1.project_id = ? AND f2.project_id = ?
+                """, (valid_project_id, valid_project_id))
+                refs = [dict(row) for row in cursor.fetchall()]
 
-            links = []
-            for c in calls:
-                links.append({
-                    "source": f"{c['caller_type']}_{c['caller_id']}",
-                    "target": f"{c['callee_type']}_{c['callee_id']}",
-                    "relation": "call"
-                })
+                links = []
+                for c in calls:
+                    links.append({
+                        "source": f"{c['caller_type']}_{c['caller_id']}",
+                        "target": f"{c['callee_type']}_{c['callee_id']}",
+                        "relation": "call"
+                    })
 
-            for r in refs:
-                links.append({
-                    "source": f"{r['from_type']}_{r['from_id']}",
-                    "target": f"{r['to_type']}_{r['to_id']}",
-                    "relation": r['kind']
-                })
+                for r in refs:
+                    links.append({
+                        "source": f"{r['from_type']}_{r['from_id']}",
+                        "target": f"{r['to_type']}_{r['to_id']}",
+                        "relation": r['kind']
+                    })
 
-            logger.debug(f"get_graph_data: 构建完成，{len(nodes)} 个节点，{len(links)} 个关系")
-            return {"nodes": nodes, "links": links}
+                logger.debug(f"get_graph_data: 构建完成，{len(nodes)} 个节点，{len(links)} 个关系")
+                return {"nodes": nodes, "links": links}
+        except ValidationError as e:
+            logger.error(f"get_graph_data: 验证失败 - {e}")
+            raise ValueError(str(e))
 
     def search(self, project_id: int, query: str, type_filter: str = None) -> List[Dict[str, Any]]:
         logger.debug(f"search: 开始搜索 project_id={project_id}, query={query}")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            results = []
+        try:
+            valid_project_id = validate_project_id(project_id)
+            clean_query = validate_search_query(query)
+            
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                results = []
 
-            if not type_filter or type_filter == "type":
-                cursor.execute("""
-                    SELECT t.id, t.name, t.kind, f.path as file_path, 'type' as entity_type
-                    FROM types t
-                    JOIN files f ON t.file_id = f.id
-                    WHERE f.project_id = ? AND t.name LIKE ?
-                """, (project_id, f"%{query}%"))
-                results.extend([dict(row) for row in cursor.fetchall()])
+                if not type_filter or type_filter == "type":
+                    cursor.execute("""
+                        SELECT t.id, t.name, t.kind, f.path as file_path, 'type' as entity_type
+                        FROM types t
+                        JOIN files f ON t.file_id = f.id
+                        WHERE f.project_id = ? AND t.name LIKE ?
+                    """, (valid_project_id, f"%{clean_query}%"))
+                    results.extend([dict(row) for row in cursor.fetchall()])
 
-            if not type_filter or type_filter == "function":
-                cursor.execute("""
-                    SELECT f.id, f.name, 'function' as kind, ff.path as file_path, 'function' as entity_type
-                    FROM functions f
-                    JOIN files ff ON f.file_id = ff.id
-                    WHERE ff.project_id = ? AND f.name LIKE ?
-                """, (project_id, f"%{query}%"))
-                results.extend([dict(row) for row in cursor.fetchall()])
+                if not type_filter or type_filter == "function":
+                    cursor.execute("""
+                        SELECT f.id, f.name, 'function' as kind, ff.path as file_path, 'function' as entity_type
+                        FROM functions f
+                        JOIN files ff ON f.file_id = ff.id
+                        WHERE ff.project_id = ? AND f.name LIKE ?
+                    """, (valid_project_id, f"%{clean_query}%"))
+                    results.extend([dict(row) for row in cursor.fetchall()])
 
-            logger.debug(f"search: 搜索完成，找到 {len(results)} 个结果")
-            return results
+                logger.debug(f"search: 搜索完成，找到 {len(results)} 个结果")
+                return results
+        except ValidationError as e:
+            logger.error(f"search: 验证失败 - {e}")
+            raise ValueError(str(e))
 
     def get_stats(self, project_id: int) -> Dict[str, Any]:
         logger.debug(f"get_stats: 获取统计信息 project_id={project_id}")
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM files WHERE project_id = ?", (project_id,))
-            file_count = cursor.fetchone()[0]
+        try:
+            valid_project_id = validate_project_id(project_id)
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM files WHERE project_id = ?", (valid_project_id,))
+                file_count = cursor.fetchone()[0]
 
-            cursor.execute("""
-                SELECT COUNT(*) FROM types t
-                JOIN files f ON t.file_id = f.id
-                WHERE f.project_id = ?
-            """, (project_id,))
-            type_count = cursor.fetchone()[0]
+                cursor.execute("""
+                    SELECT COUNT(*) FROM types t
+                    JOIN files f ON t.file_id = f.id
+                    WHERE f.project_id = ?
+                """, (valid_project_id,))
+                type_count = cursor.fetchone()[0]
 
-            cursor.execute("""
-                SELECT COUNT(*) FROM functions f
-                JOIN files ff ON f.file_id = ff.id
-                WHERE ff.project_id = ?
-            """, (project_id,))
-            func_count = cursor.fetchone()[0]
+                cursor.execute("""
+                    SELECT COUNT(*) FROM functions f
+                    JOIN files ff ON f.file_id = ff.id
+                    WHERE ff.project_id = ?
+                """, (valid_project_id,))
+                func_count = cursor.fetchone()[0]
 
-            cursor.execute("""
-                SELECT f.language, COUNT(*) as count FROM files f
-                WHERE f.project_id = ?
-                GROUP BY f.language
-            """, (project_id,))
-            languages = {row[0]: row[1] for row in cursor.fetchall()}
+                cursor.execute("""
+                    SELECT f.language, COUNT(*) as count FROM files f
+                    WHERE f.project_id = ?
+                    GROUP BY f.language
+                """, (valid_project_id,))
+                languages = {row[0]: row[1] for row in cursor.fetchall()}
 
-            stats = {
-                "file_count": file_count,
-                "type_count": type_count,
-                "function_count": func_count,
-                "languages": languages
-            }
-            logger.debug(f"get_stats: 统计完成 {stats}")
-            return stats
+                stats = {
+                    "file_count": file_count,
+                    "type_count": type_count,
+                    "function_count": func_count,
+                    "languages": languages
+                }
+                logger.debug(f"get_stats: 统计完成 {stats}")
+                return stats
+        except ValidationError as e:
+            logger.error(f"get_stats: 验证失败 - {e}")
+            raise ValueError(str(e))
 
 db = Database()
