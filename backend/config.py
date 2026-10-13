@@ -2,7 +2,7 @@ import os
 
 class Config:
     DATABASE_PATH = os.getenv("DATABASE_PATH", "codegraph.db")
-    SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "sk-uqelhavcdhfxjzjesdenxpbtqombamjniazzjtbssmdcwdvg")
+    SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "REDACTED_API_KEY")
     SILICONFLOW_ENDPOINT = "https://api.siliconflow.cn/v1/chat/completions"
     LLM_MODEL = "deepseek-ai/DeepSeek-V2.5"
     DEBOUNCE_DELAY_MS = 1000
